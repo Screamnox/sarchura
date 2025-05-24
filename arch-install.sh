@@ -5,9 +5,6 @@
 
 set -euo pipefail  # Exit on error, undefined vars, pipe failures
 
-# Ensure stdin is connected to terminal
-exec < /dev/tty
-
 # Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -74,13 +71,18 @@ fdisk -l
 
 # Confirm disk selection
 echo -e "${YELLOW}WARNING: This will completely wipe ${DISK}!${NC}"
-echo -n "Are you sure you want to continue? (yes/no): "
-read confirm
-# Convert to lowercase for case-insensitive comparison
-confirm=$(echo "$confirm" | tr '[:upper:]' '[:lower:]')
-if [[ $confirm != "yes" && $confirm != "y" ]]; then
-    error "Installation cancelled by user"
-fi
+while true; do
+    echo -n "Are you sure you want to continue? (yes/no): "
+    read -r confirm
+    confirm=$(echo "$confirm" | tr '[:upper:]' '[:lower:]')
+    if [[ $confirm == "yes" || $confirm == "y" ]]; then
+        break
+    elif [[ $confirm == "no" || $confirm == "n" ]]; then
+        error "Installation cancelled by user"
+    else
+        echo "Please enter 'yes' or 'no'"
+    fi
+done
 
 # Partition the disk
 log "Partitioning disk ${DISK}..."
