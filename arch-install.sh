@@ -71,8 +71,11 @@ fdisk -l
 
 # Confirm disk selection
 echo -e "${YELLOW}WARNING: This will completely wipe ${DISK}!${NC}"
-read -p "Are you sure you want to continue? (yes/no): " confirm
-if [[ $confirm != "yes" ]]; then
+echo -n "Are you sure you want to continue? (yes/no): "
+read confirm < /dev/tty
+# Convert to lowercase for case-insensitive comparison
+confirm=$(echo "$confirm" | tr '[:upper:]' '[:lower:]')
+if [[ $confirm != "yes" && $confirm != "y" ]]; then
     error "Installation cancelled by user"
 fi
 
@@ -108,10 +111,10 @@ lsblk ${DISK}
 # LVM on LUKS setup
 log "Setting up LUKS encryption..."
 echo "You will need to enter a passphrase for disk encryption:"
-cryptsetup luksFormat ${DISK}2
+cryptsetup luksFormat ${DISK}2 < /dev/tty
 
 echo "Enter the passphrase again to open the encrypted partition:"
-cryptsetup open ${DISK}2 cryptlvm
+cryptsetup open ${DISK}2 cryptlvm < /dev/tty
 
 log "Setting up LVM..."
 pvcreate /dev/mapper/cryptlvm
@@ -225,12 +228,12 @@ useradd -m -G wheel screamnox
 # Set root password
 log "Setting root password..."
 echo "Please set the root password:"
-passwd
+passwd < /dev/tty
 
 # Set user password
 log "Setting user password..."
 echo "Please set the password for user screamnox:"
-passwd screamnox
+passwd screamnox < /dev/tty
 
 # Configure sudo
 log "Configuring sudo..."
