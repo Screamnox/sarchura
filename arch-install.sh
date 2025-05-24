@@ -5,6 +5,9 @@
 
 set -euo pipefail  # Exit on error, undefined vars, pipe failures
 
+# Ensure stdin is connected to terminal
+exec < /dev/tty
+
 # Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -72,7 +75,7 @@ fdisk -l
 # Confirm disk selection
 echo -e "${YELLOW}WARNING: This will completely wipe ${DISK}!${NC}"
 echo -n "Are you sure you want to continue? (yes/no): "
-read confirm < /dev/tty
+read confirm
 # Convert to lowercase for case-insensitive comparison
 confirm=$(echo "$confirm" | tr '[:upper:]' '[:lower:]')
 if [[ $confirm != "yes" && $confirm != "y" ]]; then
@@ -111,10 +114,10 @@ lsblk ${DISK}
 # LVM on LUKS setup
 log "Setting up LUKS encryption..."
 echo "You will need to enter a passphrase for disk encryption:"
-cryptsetup luksFormat ${DISK}2 < /dev/tty
+cryptsetup luksFormat ${DISK}2
 
 echo "Enter the passphrase again to open the encrypted partition:"
-cryptsetup open ${DISK}2 cryptlvm < /dev/tty
+cryptsetup open ${DISK}2 cryptlvm
 
 log "Setting up LVM..."
 pvcreate /dev/mapper/cryptlvm
@@ -228,12 +231,12 @@ useradd -m -G wheel screamnox
 # Set root password
 log "Setting root password..."
 echo "Please set the root password:"
-passwd < /dev/tty
+passwd
 
 # Set user password
 log "Setting user password..."
 echo "Please set the password for user screamnox:"
-passwd screamnox < /dev/tty
+passwd screamnox
 
 # Configure sudo
 log "Configuring sudo..."
