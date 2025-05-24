@@ -1,132 +1,266 @@
 #!/bin/bash
-set -euo pipefail
-# Run as root from Arch live environment
 
-# Variables
+# Arch Linux Automated Installation Script
+# Based on your usual installation process
+
+set -euo pipefail  # Exit on error, undefined vars, pipe failures
+
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m' # No Color
+
+# Logging function
+log() {
+    echo -e "${GREEN}[$(date +'%Y-%m-%d %H:%M:%S')] $1${NC}"
+}
+
+warn() {
+    echo -e "${YELLOW}[WARNING] $1${NC}"
+}
+
+error() {
+    echo -e "${RED}[ERROR] $1${NC}"
+    exit 1
+}
+
+# Configuration variables
 DISK="/dev/sda"
-CRYPT_NAME="cryptlvm"
 VG_NAME="gandalf"
-ROOT_LV="root"
-HOME_LV="home"
+ROOT_SIZE="20G"
 HOSTNAME="sarchura"
-USER="icescream"
-LOCALE="en_US.UTF-8"
-KEYMAP="fr"
+USERNAME="screamnox"
 TIMEZONE="Europe/Paris"
 
-# 1. Init
+# Check if running as root
+if [[ $EUID -ne 0 ]]; then
+   error "This script must be run as root"
+fi
+
+# Check if we're in UEFI mode
+if [[ ! -d /sys/firmware/efi ]]; then
+    error "This script requires UEFI boot mode"
+fi
+
+log "Starting Arch Linux automated installation..."
+
+# Initial setup
+log "Setting up keyboard and font..."
 loadkeys fr
 setfont ter-132b
 
-# Check if system is UEFI 64-bit
-if [[ "$(cat /sys/firmware/efi/fw_platform_size)" != "64" ]]; then
-  echo "System is not 64-bit UEFI, aborting."
-  exit 1
+# Check UEFI firmware platform
+if [[ $(cat /sys/firmware/efi/fw_platform_size 2>/dev/null) != "64" ]]; then
+    warn "Not running on 64-bit UEFI"
 fi
 
-ping -c 3 archlinux.org
+# Check internet connectivity
+log "Checking internet connectivity..."
+if ! ping -c 3 archlinux.org > /dev/null 2>&1; then
+    error "No internet connection. Please check your network."
+fi
 
-# 2. Time check
-timedatectl set-ntp true
+# Time synchronization
+log "Synchronizing time..."
+timedatectl
 
-# 3. Partition the disk
-sgdisk --zap-all $DISK  # Clean partition table
+# Display current disk layout
+log "Current disk layout:"
+fdisk -l
 
-# Create partitions:
-# 1: EFI, 1G, type ef00 (UEFI System)
-# 2: rest, type 8e00 (Linux LVM)
-parted $DISK --script mklabel gpt
-parted $DISK --script mkpart primary fat32 1MiB 1025MiB
-parted $DISK --script set 1 boot on
-parted $DISK --script name 1 EFI
-parted $DISK --script mkpart primary 1025MiB 100%
-parted $DISK --script name 2 LVM
+# Confirm disk selection
+echo -e "${YELLOW}WARNING: This will completely wipe ${DISK}!${NC}"
+read -p "Are you sure you want to continue? (yes/no): " confirm
+if [[ $confirm != "yes" ]]; then
+    error "Installation cancelled by user"
+fi
 
-# 4. Setup LUKS on /dev/sda2
-echo "Set LUKS passphrase for $DISK""2"
+# Partition the disk
+log "Partitioning disk ${DISK}..."
+# Create GPT partition table and partitions
+fdisk ${DISK} << EOF
+g
+n
+
+
++1G
+t
+1
+n
+
+
+
+t
+2
+44
+p
+w
+EOF
+
+# Wait for partitions to be recognized
+sleep 2
+partprobe ${DISK}
+
+log "Partition layout created:"
+lsblk ${DISK}
+
+# LVM on LUKS setup
+log "Setting up LUKS encryption..."
+echo "You will need to enter a passphrase for disk encryption:"
 cryptsetup luksFormat ${DISK}2
-cryptsetup open ${DISK}2 $CRYPT_NAME
 
-# 5. Setup LVM on /dev/mapper/cryptlvm
-pvcreate /dev/mapper/$CRYPT_NAME
-vgcreate $VG_NAME /dev/mapper/$CRYPT_NAME
-lvcreate -L 20G -n $ROOT_LV $VG_NAME
-lvcreate -l +100%FREE -n $HOME_LV $VG_NAME
-lvreduce -L -256M $VG_NAME/$HOME_LV
+echo "Enter the passphrase again to open the encrypted partition:"
+cryptsetup open ${DISK}2 cryptlvm
 
-# 6. Format partitions
-mkfs.fat -F32 ${DISK}1
-mkfs.ext4 /dev/$VG_NAME/$ROOT_LV
-mkfs.ext4 /dev/$VG_NAME/$HOME_LV
+log "Setting up LVM..."
+pvcreate /dev/mapper/cryptlvm
+vgcreate ${VG_NAME} /dev/mapper/cryptlvm
 
-# 7. Mount partitions
-mount /dev/$VG_NAME/$ROOT_LV /mnt
-mkdir -p /mnt/home /mnt/boot
-mount /dev/$VG_NAME/$HOME_LV /mnt/home
-mount ${DISK}1 /mnt/boot
+log "Current VG status:"
+vgdisplay
 
-# 8. Install base system
-pacstrap /mnt base linux linux-firmware vim sudo lvm2 man-pages man-db texinfo openssh git networkmanager
+log "Creating logical volumes..."
+lvcreate -L ${ROOT_SIZE} -n root ${VG_NAME}
+lvcreate -l +100%FREE -n home ${VG_NAME}
+lvreduce -L -256M ${VG_NAME}/home --yes
 
-# 9. Generate fstab
+log "Logical volumes created:"
+lvdisplay
+
+# Format partitions
+log "Formatting partitions..."
+mkfs.ext4 /dev/${VG_NAME}/root
+mkfs.ext4 /dev/${VG_NAME}/home
+mkfs.fat -F 32 ${DISK}1
+
+# Mount partitions
+log "Mounting partitions..."
+mount /dev/${VG_NAME}/root /mnt
+mount --mkdir /dev/${VG_NAME}/home /mnt/home
+mount --mkdir ${DISK}1 /mnt/boot
+
+log "Mount points:"
+lsblk
+
+# Install essential packages
+log "Installing essential packages..."
+pacstrap -K /mnt base linux linux-firmware
+
+# Generate fstab
+log "Generating fstab..."
 genfstab -U /mnt >> /mnt/etc/fstab
 
-# 10. Configure system inside chroot
-arch-chroot /mnt /bin/bash <<EOF
+# Create chroot script
+log "Creating chroot configuration script..."
+cat << 'CHROOT_SCRIPT' > /mnt/arch_chroot.sh
+#!/bin/bash
 
-# Timezone
-ln -sf /usr/share/zoneinfo/$TIMEZONE /etc/localtime
+set -euo pipefail
+
+# Colors
+GREEN='\033[0;32m'
+NC='\033[0m'
+
+log() {
+    echo -e "${GREEN}[CHROOT] $1${NC}"
+}
+
+log "Configuring system inside chroot..."
+
+# Set timezone
+log "Setting timezone..."
+ln -sf /usr/share/zoneinfo/Europe/Paris /etc/localtime
 hwclock --systohc
+date
 
-# Locale
-sed -i 's/^#\(en_US.UTF-8 UTF-8\)/\1/' /etc/locale.gen
+# Install additional packages
+log "Installing additional packages..."
+pacman -Syu --noconfirm vim sudo lvm2 man-pages man-db texinfo openssh git networkmanager
+
+# Configure locale
+log "Configuring locale..."
+sed -i 's/#en_US.UTF-8 UTF-8/en_US.UTF-8 UTF-8/' /etc/locale.gen
 locale-gen
-echo "LANG=$LOCALE" > /etc/locale.conf
-echo "KEYMAP=$KEYMAP" > /etc/vconsole.conf
+echo "LANG=en_US.UTF-8" > /etc/locale.conf
+echo "KEYMAP=fr" > /etc/vconsole.conf
 
-# Hostname
-echo "$HOSTNAME" > /etc/hostname
+# Set hostname
+log "Setting hostname..."
+echo "sarchura" > /etc/hostname
 
-# Networking and packages
-pacman -Syu --noconfirm networkmanager
+# Enable NetworkManager
+log "Enabling NetworkManager..."
 systemctl enable NetworkManager
 
-# mkinitcpio
+# Configure mkinitcpio
+log "Configuring mkinitcpio..."
 sed -i 's/^HOOKS=.*/HOOKS=(base systemd autodetect microcode modconf kms keyboard sd-vconsole block sd-encrypt lvm2 filesystems fsck)/' /etc/mkinitcpio.conf
 mkinitcpio -P
 
-# Bootloader install and configure systemd-boot
+# Install and configure systemd-boot
+log "Installing systemd-boot..."
 bootctl install
+bootctl update
 
-UUID=$(blkid -s UUID -o value $DISK"2")
-cat > /boot/loader/entries/arch.conf <<EOL
-title   Arch Linux
-linux   /vmlinuz-linux
-initrd  /initramfs-linux.img
-options rd.luks.name=$UUID=$CRYPT_NAME root=/dev/$VG_NAME/$ROOT_LV rw
-EOL
+# Get UUID of encrypted partition
+DEVICE_UUID=$(blkid -o value -s UUID /dev/sda2)
 
-cat > /boot/loader/loader.conf <<EOL
-default arch.conf
-timeout 3
-editor  no
-EOL
-
-# Create user and set passwords
-useradd -m -G wheel $USER
-echo "Set root password:"
-passwd
-echo "Set password for $USER:"
-passwd $USER
-
-# Enable sudo for wheel group
-sed -i 's/^# %wheel ALL=(ALL:ALL) ALL/%wheel ALL=(ALL:ALL) ALL/' /etc/sudoers
-
+# Create boot entry
+log "Creating boot entry..."
+cat > /boot/loader/entries/arch.conf << EOF
+title Arch Linux
+linux /vmlinuz-linux
+initrd /initramfs-linux.img
+options rd.luks.name=${DEVICE_UUID}=cryptlvm root=/dev/gandalf/root rw
 EOF
 
-# 11. Clean up and reboot
-umount -R /mnt
-cryptsetup close $CRYPT_NAME
+# Rebuild initramfs
+mkinitcpio -P
 
-echo "Installation complete. Rebooting..."
+# Create user
+log "Creating user..."
+useradd -m -G wheel screamnox
+
+# Set root password
+log "Setting root password..."
+echo "Please set the root password:"
+passwd
+
+# Set user password
+log "Setting user password..."
+echo "Please set the password for user screamnox:"
+passwd screamnox
+
+# Configure sudo
+log "Configuring sudo..."
+sed -i 's/# %wheel ALL=(ALL:ALL) ALL/%wheel ALL=(ALL:ALL) ALL/' /etc/sudoers
+
+log "Chroot configuration completed!"
+CHROOT_SCRIPT
+
+# Make the chroot script executable
+chmod +x /mnt/arch_chroot.sh
+
+# Execute chroot script
+log "Entering chroot environment..."
+arch-chroot /mnt /arch_chroot.sh
+
+# Clean up
+log "Cleaning up..."
+rm /mnt/arch_chroot.sh
+
+# Unmount and reboot
+log "Installation completed! Unmounting filesystems..."
+umount -R /mnt
+
+echo -e "${GREEN}"
+echo "================================================"
+echo "  Arch Linux installation completed successfully!"
+echo "================================================"
+echo -e "${NC}"
+echo "The system will reboot in 10 seconds..."
+echo "Press Ctrl+C to cancel the reboot."
+
+sleep 10
 reboot
